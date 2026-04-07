@@ -154,8 +154,13 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: dist-${{ matrix.platform }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # Include lib dir hash so libkrun updates bust the cache
+          key: dist-${{ matrix.platform }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles(format('{0}/*', matrix.lib_dir)) }}
           restore-keys: dist-${{ matrix.platform }}-cargo-
+
+      # Force relink if cached binary was linked against a different libkrun
+      - name: Clean stale build artifacts
+        run: rm -f target/release/smolvm target/release/deps/smolvm-*
 
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
@@ -238,6 +243,29 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_PASSWORD" \
             --wait
+
+      - name: Verify bundled libraries match source
+        run: |
+          VERSION="$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)"
+          DIST_LIB="dist/smolvm-${VERSION}-${{ matrix.platform }}/lib"
+          echo "Source libraries:"
+          ls -la ${{ matrix.lib_dir }}/
+          echo "Bundled libraries:"
+          ls -la "$DIST_LIB"/
+          # Verify sizes match (catches stale LFS or copy issues)
+          for lib in "$DIST_LIB"/libkrun*; do
+            name=$(basename "$lib")
+            src="${{ matrix.lib_dir }}/$name"
+            if [[ -f "$src" ]] && [[ ! -L "$lib" ]]; then
+              src_size=$(wc -c < "$src")
+              dst_size=$(wc -c < "$lib")
+              if [[ "$src_size" != "$dst_size" ]]; then
+                echo "ERROR: $name size mismatch: source=$src_size bundled=$dst_size"
+                exit 1
+              fi
+              echo "OK: $name ($dst_size bytes)"
+            fi
+          done
 
       - name: List distribution contents
         run: |
