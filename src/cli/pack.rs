@@ -503,17 +503,22 @@ impl PackCreateCmd {
             .with_stub(&stub_path)
             .with_asset_collector(collector);
 
+        let label = if self.single_file {
+            "Assembling single-file packed binary"
+        } else {
+            "Assembling packed binary"
+        };
+        let spinner = Spinner::start(label);
         let info = if self.single_file {
-            println!("Assembling single-file packed binary...");
             packer
                 .pack_embedded(&self.output)
                 .map_err(|e| Error::agent("pack binary", e.to_string()))?
         } else {
-            println!("Assembling packed binary...");
             packer
                 .pack(&self.output)
                 .map_err(|e| Error::agent("pack binary", e.to_string()))?
         };
+        spinner.stop();
 
         println!(
             "Packed: {} (stub: {}KB, total: {}KB)",
@@ -1242,6 +1247,56 @@ fn fmt_bytes(bytes: u64) -> String {
         format!("{} KB", bytes / 1024)
     } else {
         format!("{} MB", bytes / (1024 * 1024))
+    }
+}
+
+/// A simple terminal spinner that prints a rotating character every 200ms.
+/// Stops automatically on drop (error paths) or via explicit `stop()`.
+struct Spinner {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Spinner {
+    fn start(label: &str) -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        let label = label.to_string();
+
+        let handle = std::thread::spawn(move || {
+            let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let mut i = 0;
+            while !stop_clone.load(Ordering::Relaxed) {
+                print!("\r{} {}\x1b[K", frames[i % frames.len()], label);
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                i += 1;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            print!("\r\x1b[K");
+            println!("{} done", label);
+        });
+
+        Spinner {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn stop(self) {
+        // Drop impl handles the actual shutdown
+        drop(self);
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
     }
 }
 
