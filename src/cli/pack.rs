@@ -286,12 +286,13 @@ impl PackCreateCmd {
                 &layer_digest[..19]
             );
 
-            // Export layer via agent
-            let layer_data = self.export_layer(&mut client, &image_info.digest, i)?;
+            // Export layer via agent — streamed directly to staging disk (zero memory buffering)
+            let layer_file = collector.layer_staging_path(layer_digest);
+            self.export_layer_to_file(&mut client, &image_info.digest, i, &layer_file)?;
 
-            // Add to collector
+            // Register the already-written file in the collector's inventory
             collector
-                .add_layer(layer_digest, &layer_data)
+                .register_layer(layer_digest)
                 .map_err(|e| Error::agent("collect layers", e.to_string()))?;
         }
 
@@ -735,14 +736,19 @@ impl PackCreateCmd {
     /// Export a layer from the agent.
     ///
     /// The agent streams the layer as a sequence of `LayerData` chunks.
-    /// We accumulate them into a single `Vec<u8>`.
-    fn export_layer(
+    /// Export a layer from the agent, streaming chunks directly to a file on disk.
+    ///
+    /// No memory buffering — each 16MB chunk is written to disk as it arrives.
+    /// This supports layers of any size without hitting host memory limits.
+    fn export_layer_to_file(
         &self,
         client: &mut AgentClient,
         image_digest: &str,
         layer_index: usize,
-    ) -> smolvm::Result<Vec<u8>> {
+        dest: &std::path::Path,
+    ) -> smolvm::Result<()> {
         use smolvm_protocol::AgentRequest;
+        use std::io::Write;
         use std::time::{Duration, Instant};
 
         const LAYER_EXPORT_TIMEOUT: Duration = Duration::from_secs(600); // 10 minutes
@@ -752,15 +758,18 @@ impl PackCreateCmd {
             layer_index,
         };
 
-        // Extend socket read timeout for the duration of the export.
-        // The default 30s timeout would fire before our wall-clock guard
-        // if the agent stalls between chunks.
         let _timeout_guard = client.set_extended_read_timeout(LAYER_EXPORT_TIMEOUT)?;
-
         client.send_raw(&request)?;
 
+        let mut file = std::fs::File::create(dest).map_err(|e| {
+            Error::agent(
+                "export layer",
+                format!("failed to create {}: {}", dest.display(), e),
+            )
+        })?;
+
         let start = Instant::now();
-        let mut result = Vec::new();
+        let mut total_bytes = 0u64;
         loop {
             if start.elapsed() > LAYER_EXPORT_TIMEOUT {
                 return Err(Error::agent(
@@ -768,7 +777,7 @@ impl PackCreateCmd {
                     format!(
                         "layer export timed out after {}s (received {} bytes so far)",
                         LAYER_EXPORT_TIMEOUT.as_secs(),
-                        result.len()
+                        total_bytes
                     ),
                 ));
             }
@@ -776,9 +785,17 @@ impl PackCreateCmd {
             let response = client.recv_raw()?;
             match response {
                 AgentResponse::LayerData { data, done } => {
-                    result.extend_from_slice(&data);
+                    if !data.is_empty() {
+                        file.write_all(&data).map_err(|e| {
+                            Error::agent("export layer", format!("write failed: {}", e))
+                        })?;
+                        total_bytes += data.len() as u64;
+                    }
                     if done {
-                        return Ok(result);
+                        file.flush().map_err(|e| {
+                            Error::agent("export layer", format!("flush failed: {}", e))
+                        })?;
+                        return Ok(());
                     }
                 }
                 AgentResponse::Error { message, .. } => {
