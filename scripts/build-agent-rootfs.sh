@@ -146,24 +146,31 @@ install_packages_apk_static() {
     echo "Packages installed successfully"
 }
 
-repair_required_tool_modes() {
+repair_executable_modes() {
     local rootfs_dir="$1"
-    local tools=(
-        "$rootfs_dir/usr/bin/crun"
-        "$rootfs_dir/usr/sbin/resize2fs"
+    local dirs=(
+        "$rootfs_dir/bin"
+        "$rootfs_dir/sbin"
+        "$rootfs_dir/usr/bin"
+        "$rootfs_dir/usr/sbin"
+        "$rootfs_dir/usr/local/bin"
+        "$rootfs_dir/usr/local/sbin"
     )
 
-    echo "Repairing required tool permissions..."
-    for tool in "${tools[@]}"; do
-        if [[ ! -f "$tool" ]]; then
+    echo "Normalizing executable permissions..."
+    for dir in "${dirs[@]}"; do
+        if [[ ! -d "$dir" ]]; then
             continue
         fi
 
         # On the macOS build path, apk install into the host-mounted rootfs can
-        # leave these guest tools without execute bits (observed as mode 0600).
-        # They are required for packed/container execution, so restore the
-        # standard executable mode before install or packing preserves the bug.
-        chmod 755 "$tool"
+        # strip execute bits from package-installed guest tools. We observed
+        # this on crun, resize2fs, and e2fsck, and the failures only surfaced
+        # later during packed/container execution. These directories are the
+        # standard executable locations in the guest rootfs, so normalize their
+        # contents before install/pack preserves the bad modes.
+        find "$dir" -type d -exec chmod 755 {} +
+        find "$dir" -type f -exec chmod 755 {} +
     done
 }
 
@@ -186,7 +193,7 @@ else
     exit 1
 fi
 
-repair_required_tool_modes "$OUTPUT_DIR"
+repair_executable_modes "$OUTPUT_DIR"
 
 # Create necessary directories
 mkdir -p "$OUTPUT_DIR/storage"
