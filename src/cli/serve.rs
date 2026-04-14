@@ -143,9 +143,14 @@ impl ServeStartCmd {
         });
 
         // Create router
-        let app = smolvm::api::create_router(state, self.cors_origins);
+        let app = smolvm::api::create_router(state, self.cors_origins.clone());
 
-        Self::bind(listen_target, app).await?;
+        // Listen server on TCP or Unix socket
+        match listen_target {
+            ListenTarget::Tcp(addr) => self.serve_tcp(addr, app).await?,
+            #[cfg(unix)]
+            ListenTarget::Unix(path) => self.serve_unix(path, app).await?,
+        }
 
         // Signal supervisor to stop
         let _ = shutdown_tx.send(true);
@@ -159,15 +164,7 @@ impl ServeStartCmd {
         Ok(())
     }
 
-    async fn bind(listen_target: ListenTarget, app: Router) -> Result<()> {
-        match listen_target {
-            ListenTarget::Tcp(addr) => Self::bind_tcp(addr, app).await,
-            #[cfg(unix)]
-            ListenTarget::Unix(path) => Self::bind_unix(path, app).await,
-        }
-    }
-
-    async fn bind_tcp(addr: SocketAddr, app: Router) -> Result<()> {
+    async fn serve_tcp(&self, addr: SocketAddr, app: Router) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(smolvm::error::Error::Io)?;
@@ -182,7 +179,7 @@ impl ServeStartCmd {
     }
 
     #[cfg(unix)]
-    async fn bind_unix(path: PathBuf, app: Router) -> Result<()> {
+    async fn serve_unix(&self, path: PathBuf, app: Router) -> Result<()> {
         let socket_guard = UnixSocketGuard::bind(&path)?;
         let listener =
             tokio::net::UnixListener::bind(&socket_guard.path).map_err(smolvm::error::Error::Io)?;
