@@ -719,6 +719,11 @@ impl ExecCmd {
     pub fn run(self) -> smolvm::Result<()> {
         let (manager, mut client) = vm_common::ensure_running_and_connect(&self.name)?;
 
+        // Detach immediately — exec never owns the VM lifecycle. Without this,
+        // any early return (failed exec, timeout, client signal) triggers
+        // AgentManager::Drop which calls stop() and kills the VM.
+        manager.detach();
+
         let env = parse_env_list(&self.env);
 
         // Load machine record for workdir and image info
@@ -764,7 +769,6 @@ impl ExecCmd {
                     }
                 }
             }
-            manager.detach();
             std::process::exit(exit_code);
         }
 
@@ -789,7 +793,6 @@ impl ExecCmd {
                     .with_tty(self.tty)
                     .with_persistent_overlay(Some(machine_name.clone()));
                 let exit_code = client.run_interactive(config)?;
-                manager.detach();
                 std::process::exit(exit_code);
             }
 
@@ -811,7 +814,6 @@ impl ExecCmd {
                     self.timeout,
                     self.tty,
                 )?;
-                manager.detach();
                 std::process::exit(exit_code);
             }
 
