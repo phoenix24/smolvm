@@ -24,7 +24,7 @@ pub mod types;
 
 use axum::{
     extract::Request,
-    http::HeaderValue,
+    http::{HeaderValue, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{delete, get, post, put},
@@ -160,9 +160,10 @@ pub fn create_router(state: Arc<ApiState>, cors_origins: Vec<String>) -> Router 
         .route("/:id/images", get(handlers::images::list_images))
         .route("/:id/images/pull", post(handlers::images::pull_image))
         // Apply timeout only to these routes
-        .layer(TimeoutLayer::new(Duration::from_secs(
-            API_REQUEST_TIMEOUT_SECS,
-        )));
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(API_REQUEST_TIMEOUT_SECS),
+        ));
 
     // Machine routes
     let machine_routes = Router::new()
