@@ -2202,6 +2202,16 @@ fn spawn_interactive_command(
 }
 
 /// Run the interactive I/O loop using poll() for efficient I/O multiplexing.
+/// Kill a child process and return a timeout exit code. Used when the host
+/// disconnects during an interactive exec — the agent must clean up the
+/// child and continue accepting new connections rather than propagating
+/// the I/O error.
+fn kill_child_on_disconnect(child: &mut Child) -> i32 {
+    let _ = child.kill();
+    let _ = child.wait();
+    124
+}
+
 fn run_interactive_loop(
     stream: &mut impl ReadWrite,
     child: &mut Child,
@@ -2308,19 +2318,25 @@ fn run_interactive_loop(
             continue;
         }
 
-        // Read available stdout
+        // Read available stdout. If send_response fails (host disconnected),
+        // kill the child and return gracefully.
         if poll_fds[0].revents & libc::POLLIN != 0 {
             if let Some(ref mut stdout) = child_stdout {
                 loop {
                     match stdout.read(&mut stdout_buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            send_response(
+                            if send_response(
                                 stream,
                                 &AgentResponse::Stdout {
                                     data: stdout_buf[..n].to_vec(),
                                 },
-                            )?;
+                            )
+                            .is_err()
+                            {
+                                debug!("host disconnected while sending stdout");
+                                return Ok(kill_child_on_disconnect(child));
+                            }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(e) => {
@@ -2332,19 +2348,24 @@ fn run_interactive_loop(
             }
         }
 
-        // Read available stderr
+        // Read available stderr. Same disconnection handling as stdout.
         if poll_fds[1].revents & libc::POLLIN != 0 {
             if let Some(ref mut stderr) = child_stderr {
                 loop {
                     match stderr.read(&mut stderr_buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            send_response(
+                            if send_response(
                                 stream,
                                 &AgentResponse::Stderr {
                                     data: stderr_buf[..n].to_vec(),
                                 },
-                            )?;
+                            )
+                            .is_err()
+                            {
+                                debug!("host disconnected while sending stderr");
+                                return Ok(kill_child_on_disconnect(child));
+                            }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(e) => {
@@ -2359,15 +2380,25 @@ fn run_interactive_loop(
         // Read incoming request from host (stdin data, resize) — only when
         // poll confirms data is available, then use blocking read_exact which
         // is safe because the data is already in the kernel buffer.
-        if poll_fds[2].revents & libc::POLLIN != 0 {
+        //
+        // If the host disconnects (client killed, timeout), read_exact returns
+        // an error. In that case, kill the child and return gracefully — the
+        // agent must survive client disconnections.
+        if poll_fds[2].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
             let mut header = [0u8; 4];
-            stream.read_exact(&mut header)?;
+            if let Err(e) = stream.read_exact(&mut header) {
+                debug!(error = %e, "host disconnected during interactive exec");
+                return Ok(kill_child_on_disconnect(child));
+            }
             let len = u32::from_be_bytes(header) as usize;
             if len > MAX_MESSAGE_SIZE {
                 return Err(format!("message too large: {} bytes", len).into());
             }
             let mut buf = vec![0u8; len];
-            stream.read_exact(&mut buf)?;
+            if let Err(e) = stream.read_exact(&mut buf) {
+                debug!(error = %e, "host disconnected during interactive exec payload");
+                return Ok(kill_child_on_disconnect(child));
+            }
             let request: AgentRequest = serde_json::from_slice(&buf)?;
 
             match request {
@@ -2491,19 +2522,25 @@ fn run_interactive_loop_pty(
             continue;
         }
 
-        // Read available data from PTY master.
+        // Read available data from PTY master. If send_response fails
+        // (host disconnected), kill the child and return gracefully.
         let mut slave_closed = false;
         if poll_fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
             loop {
                 match pty_master.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        send_response(
+                        if send_response(
                             stream,
                             &AgentResponse::Stdout {
                                 data: buf[..n].to_vec(),
                             },
-                        )?;
+                        )
+                        .is_err()
+                        {
+                            debug!("host disconnected while sending PTY stdout");
+                            return Ok(kill_child_on_disconnect(child));
+                        }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(e) if e.raw_os_error() == Some(libc::EIO) => {
@@ -2529,15 +2566,22 @@ fn run_interactive_loop_pty(
 
         // Read incoming request from host — only when poll confirms data
         // is available, then use blocking read_exact (safe, data is buffered).
-        if poll_fds[1].revents & libc::POLLIN != 0 {
+        // If the host disconnects, kill the child and return gracefully.
+        if poll_fds[1].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
             let mut header = [0u8; 4];
-            stream.read_exact(&mut header)?;
+            if let Err(e) = stream.read_exact(&mut header) {
+                debug!(error = %e, "host disconnected during PTY interactive exec");
+                return Ok(kill_child_on_disconnect(child));
+            }
             let len = u32::from_be_bytes(header) as usize;
             if len > MAX_MESSAGE_SIZE {
                 return Err(format!("message too large: {} bytes", len).into());
             }
             let mut msg_buf = vec![0u8; len];
-            stream.read_exact(&mut msg_buf)?;
+            if let Err(e) = stream.read_exact(&mut msg_buf) {
+                debug!(error = %e, "host disconnected during PTY interactive exec payload");
+                return Ok(kill_child_on_disconnect(child));
+            }
             let request: AgentRequest = serde_json::from_slice(&msg_buf)?;
 
             match request {

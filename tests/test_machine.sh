@@ -107,6 +107,41 @@ test_machine_exec_exit_code() {
     [[ $exit_code -eq 1 ]]
 }
 
+# Regression test: a failed exec (nonexistent binary, empty command, bad
+# workdir) must NOT kill the VM. Previously, the error propagated through
+# ExecCmd::run(), the AgentManager was not detached, and Drop called
+# stop() which terminated the VM process.
+test_machine_exec_failed_does_not_kill_vm() {
+    ensure_machine_running
+
+    # Nonexistent binary — should fail but VM stays alive
+    local exit_code=0
+    $SMOLVM machine exec -- /nonexistent_binary_xyz 2>&1 || exit_code=$?
+    [[ $exit_code -ne 0 ]] || { echo "expected failure for nonexistent binary"; return 1; }
+
+    # VM must still be running
+    local status
+    status=$($SMOLVM machine status 2>&1)
+    [[ "$status" == *"running"* ]] || { echo "VM died after failed exec: $status"; return 1; }
+
+    # Next exec must succeed
+    local output
+    output=$($SMOLVM machine exec -- echo "survived-failed-exec" 2>&1)
+    [[ "$output" == *"survived-failed-exec"* ]] || { echo "exec after failure returned: $output"; return 1; }
+
+    # Empty string command — should fail but VM stays alive
+    exit_code=0
+    $SMOLVM machine exec -- "" 2>&1 || exit_code=$?
+    [[ $exit_code -ne 0 ]] || { echo "expected failure for empty command"; return 1; }
+
+    status=$($SMOLVM machine status 2>&1)
+    [[ "$status" == *"running"* ]] || { echo "VM died after empty command exec: $status"; return 1; }
+
+    # Final verification
+    output=$($SMOLVM machine exec -- echo "still-alive" 2>&1)
+    [[ "$output" == *"still-alive"* ]]
+}
+
 # =============================================================================
 # Named VMs
 # =============================================================================
@@ -981,6 +1016,7 @@ run_test "Machine status (running)" test_machine_status_running || true
 run_test "Machine start/stop cycle" test_machine_start_stop_cycle || true
 run_test "Machine exec" test_machine_exec || true
 run_test "Machine exec exit code" test_machine_exec_exit_code || true
+run_test "Failed exec does not kill VM" test_machine_exec_failed_does_not_kill_vm || true
 run_test "Named machine" test_machine_named_vm || true
 run_test "Create prints named start hint" test_machine_create_prints_named_start_hint || true
 run_test "Exec when stopped fails" test_machine_exec_when_stopped || true
