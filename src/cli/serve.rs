@@ -212,7 +212,7 @@ impl ListenTarget {
 
         #[cfg(unix)]
         {
-            return Ok(Self::Unix(PathBuf::from(value)));
+            Ok(Self::Unix(PathBuf::from(value)))
         }
 
         #[cfg(not(unix))]
